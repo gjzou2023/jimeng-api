@@ -436,7 +436,7 @@ async function generateImagesInternal(
   const poller = new SmartPoller({
     maxPollCount: 900,
     pollInterval: 10000, // 10秒轮询间隔
-    expectedItemCount: 4,
+    expectedItemCount: Number(process.env.JIMENG_BENEFIT_COUNT) || 4,
     type: 'image',
     timeoutSeconds: 1800 // 30 分钟超时
   });
