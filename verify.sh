@@ -12,6 +12,8 @@
 # 张数开关校验：第 7 项断言「单次生成张数 == JIMENG_BENEFIT_COUNT（默认 1）」。
 #   若服务以其他值启动（如 JIMENG_BENEFIT_COUNT=4），请以同值 export 后再跑本脚本，
 #   否则该项会如实报错——那恰恰说明开关生效了。
+# 第 8 项断言「多图路径（jimeng-4.x + 连续/绘本/故事关键词）未写张数时必须被拒绝，
+#   且错误信息含数量说明」。该用例在调用生成接口前即抛错，不消耗积分。
 #
 # 退出码：0 = 全部通过；非 0 = 有失败项。
 set -uo pipefail
@@ -76,6 +78,36 @@ print(len(items) if isinstance(items, list) else '-1')
   else
     no "单次生成返回 ${N:-?} 张，期望 $EXPECT 张（开关未生效或服务未按预期启动）"
   fi
+else
+  echo "  (跳过：未提供 TOKEN 或缺少 python3)"; fi
+
+echo "== 8. 多图路径强制数量（缺数量必须报错并给出数量说明）=="
+if [ -n "$TOKEN" ] && command -v python3 >/dev/null 2>&1; then
+  # 注意：服务端业务错误以 HTTP 200 + {"code":-2000,"message":"..."} 返回，
+  # 因此必须判 code 字段，不能用 HTTP 状态码判断。本用例在调用生成接口前即抛错，不消耗积分。
+  R8=$(curl -sS --noproxy '*' -X POST "$BASE/v1/images/generations" \
+    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d '{"model":"jimeng-4.0","prompt":"绘本风格的小猫","ratio":"1:1","resolution":"1k"}' 2>/dev/null)
+  V8=$(printf '%s' "$R8" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("PARSE_FAIL"); raise SystemExit
+if not isinstance(d, dict):
+    print("PARSE_FAIL"); raise SystemExit
+code = d.get("code")
+if code == -2000:
+    msg = str(d.get("message") or "")
+    print("PASS" if "张" in msg else "NO_GUIDE")
+else:
+    print("NOT_REJECTED:" + str(code))
+' 2>/dev/null)
+  case "$V8" in
+    PASS)      ok "多图缺数量被拒绝，且错误信息含数量说明 (code=-2000)" ;;
+    NO_GUIDE)  no "多图缺数量被拒绝，但错误信息未含数量说明" ;;
+    *)         no "多图缺数量未被拒绝 (${V8:-无响应/无法解析})" ;;
+  esac
 else
   echo "  (跳过：未提供 TOKEN 或缺少 python3)"; fi
 
