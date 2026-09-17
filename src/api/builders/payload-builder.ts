@@ -122,7 +122,9 @@ export function getBenefitCount(
 ): number | undefined {
   if (isMultiImage) return undefined;
 
-  return 4;
+  // 默认 4（与上游行为一致）；设置 JIMENG_BENEFIT_COUNT=1 可让每次请求只生成 1 张
+  // （批量系列图场景所需，避免单场景生成 4 张造成 4 倍计费）。
+  return Number(process.env.JIMENG_BENEFIT_COUNT) || 4;
 }
 
 export type GenerateMode = "text2img" | "img2img";
