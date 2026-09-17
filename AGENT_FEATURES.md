@@ -72,7 +72,7 @@ python3 scripts/agent_client.py --url http://localhost:5100 --token "Bearer <t>"
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `JIMENG_BENEFIT_COUNT` | `1` | **每请求生成张数**。改 `1` 避免批量场景每场景生 4 张造成 4 倍计费。必须与 poller `expectedItemCount` 一致（已同源处理）。 |
+| `JIMENG_BENEFIT_COUNT` | `1` | **每请求生成张数开关**。默认 `1`：批量场景每场景只出 1 张，避免 4 倍计费。想恢复「生成 4 张候选、4 选 1 挑选」设为 `4`。该开关由 `getBenefitCount()` 与 poller `expectedItemCount` **两处同源读取**，代码默认值也统一为 `1`，改一处即全生效，不会出现空等挂起。 |
 | `JIMENG_AGENT_OUT_DIR` | `/app/output` | 落盘目录 |
 | `JIMENG_STRIP_WM` | `auto` | `auto`=检测后处理；`off`=关闭 |
 | `JIMENG_PYTHON` | `python3` | 去水印解释器 |
@@ -94,7 +94,8 @@ docker compose -f docker-compose.agent.yml up -d --build
 ### 离线/无 Docker
 ```bash
 npm install && npm run build
-JIMENG_BENEFIT_COUNT=1 npm start
+npm start                            # 默认即 1 张
+JIMENG_BENEFIT_COUNT=4 npm start     # 切回 4 张候选（4 选 1 挑选）
 ```
 
 ---
@@ -102,7 +103,9 @@ JIMENG_BENEFIT_COUNT=1 npm start
 ## 5. 复测
 
 部署后运行 `bash verify.sh http://localhost:5100 "Bearer <token>"`：
-健康检查 → 根端点暴露 agent → /v1/models → 模板库 → Pillow 就绪 → 真实批量生成落盘。
+健康检查 → 根端点暴露 agent → /v1/models → 模板库 → Pillow 就绪 → 真实批量生成落盘 → **张数开关断言**。
+
+> 第 7 项断言「单次文生图返回张数 == `JIMENG_BENEFIT_COUNT`（默认 1）」，用于证明张数开关真实生效。
 
 ---
 
