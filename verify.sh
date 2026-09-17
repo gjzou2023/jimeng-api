@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# verify.sh —— jimeng-api (agent 增强版) 部署后复测脚本
+#
+# 用途：独立、完整地验证「线上仓库部署」后的全部功能是否可用。
+# 前置：服务已在 BASE_URL 启动（docker compose -f docker-compose.agent.yml up）。
+#
+# 用法：
+#   bash verify.sh [BASE_URL] [TOKEN]
+#   BASE_URL 默认 http://localhost:5100
+#   TOKEN    可选；不传则跳过需要鉴权的生成类用例（仅跑健康检查/只读端点）
+#
+# 退出码：0 = 全部通过；非 0 = 有失败项。
+set -uo pipefail
+
+BASE="${1:-http://localhost:5100}"
+TOKEN="${2:-}"
+PASS=0; FAIL=0
+ok(){ echo "  ✓ $1"; PASS=$((PASS+1)); }
+no(){ echo "  ✗ $1"; FAIL=$((FAIL+1)); }
+
+echo "== 1. /ping 健康检查 =="
+if curl -fsS --noproxy '*' "$BASE/ping" >/dev/null 2>&1; then ok "/ping"; else no "/ping 不可达"; fi
+
+echo "== 2. 根端点是否暴露 agent 路由 =="
+if curl -fsS --noproxy '*' "$BASE/" 2>/dev/null | grep -q '/v1/agent/generate'; then
+  ok "根端点列出 /v1/agent/generate"; else no "根端点缺少 agent 路由"; fi
+
+echo "== 3. /v1/models 可读 =="
+if curl -fsS --noproxy '*' "$BASE/v1/models" >/dev/null 2>&1; then ok "/v1/models"; else no "/v1/models"; fi
+
+echo "== 4. 技能模板库存在 =="
+if [ -d scripts/skills ] && [ "$(ls scripts/skills/*.md 2>/dev/null | wc -l)" -gt 0 ]; then
+  ok "技能模板 $(ls scripts/skills/*.md 2>/dev/null | wc -l) 个"; else no "技能模板库为空"; fi
+
+echo "== 5. 去水印脚本可加载 (python3 + Pillow) =="
+if command -v python3 >/dev/null 2>&1 && python3 -c "import PIL; print(1)" >/dev/null 2>&1; then
+  ok "python3 + Pillow 就绪"; else no "python3/Pillow 缺失，去水印不可用"; fi
+
+echo "== 6. 真实批量生成 (doc → 系列图, 需 TOKEN) =="
+if [ -n "$TOKEN" ] && command -v python3 >/dev/null 2>&1; then
+  rm -rf ./verify_out
+  if python3 scripts/agent_client.py --url "$BASE" --token "$TOKEN" \
+    --doc '# 复测用例
+## 场景一
+一只橘猫趴在窗台，午后阳光
+## 场景二
+橘猫拨弄毛线球' --out ./verify_out --strip-wm 2>/dev/null; then
+    N=$(ls ./verify_out/*.png 2>/dev/null | wc -l)
+    [ "$N" -ge 1 ] && ok "agent 生成并落盘 $N 张" || no "agent 生成未落盘"
+  else no "agent 生成失败"; fi
+  rm -rf ./verify_out
+else
+  echo "  (跳过：未提供 TOKEN 或缺少 python3)"; fi
+
+echo ""
+echo "VERIFY: $PASS passed, $FAIL failed"
+[ "$FAIL" -eq 0 ]
