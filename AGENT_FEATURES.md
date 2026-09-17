@@ -68,7 +68,28 @@ python3 scripts/agent_client.py --url http://localhost:5100 --token "Bearer <t>"
 
 ---
 
-## 3. 环境变量（含计费保护）
+## 3. 张数规则与环境变量（含计费保护）
+
+**两条生成路径，两套张数规则**（互不干扰，切勿混淆）：
+
+| 路径 | 触发条件 | 张数决定方式 |
+|------|----------|--------------|
+| **单图路径** | 默认；模型非 `jimeng-4.x`，或提示词不含多图关键词 | `JIMENG_BENEFIT_COUNT`（默认 `1`） |
+| **多图路径** | 模型为 `jimeng-4.0 / 4.1 / 4.5` **且** 提示词含「连续 / 绘本 / 故事 / 数字+张」 | **必须由提示词显式写明「N张」，否则直接报错** |
+
+### 多图路径的强制规范（本仓库新增）
+
+- 提示词只写了触发词（如"绘本风格的小猫"）而**未写张数** → 返回业务错误 `code: -2000`，`message` 中给出写法规约与示例，**不发起生成、不消耗积分**。
+- **不再隐式兜底 4 张**（上游原行为），避免误生成造成非预期计费。
+- 张数完全由提示词决定（`4张` → 4 张），**不受** `JIMENG_BENEFIT_COUNT` 影响。
+- 只想出 1 张时：改用 `jimeng-5.0` 等单图模型，或去掉提示词中的多图关键词。
+
+> 触发判断与张数解析共用同一正则 `/(\d+)张/`（`parseMultiImageCount()`），保证"判定为多图"与"取几张"同源，杜绝判定与解析漂移。
+> 注意：正则只识别**阿拉伯数字**——"一张照片"这类中文数字不会误触发。
+
+> ⚠️ 张数无上限校验：提示词写 `999张` 会照单全收并把轮询超时拉满（30 分钟）。请自行控制合理张数。
+
+### 环境变量
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
@@ -103,9 +124,13 @@ JIMENG_BENEFIT_COUNT=4 npm start     # 切回 4 张候选（4 选 1 挑选）
 ## 5. 复测
 
 部署后运行 `bash verify.sh http://localhost:5100 "Bearer <token>"`：
-健康检查 → 根端点暴露 agent → /v1/models → 模板库 → Pillow 就绪 → 真实批量生成落盘 → **张数开关断言**。
+健康检查 → 根端点暴露 agent → /v1/models → 模板库 → Pillow 就绪 → 真实批量生成落盘 → **张数开关断言** → **多图强制数量断言**。
 
 > 第 7 项断言「单次文生图返回张数 == `JIMENG_BENEFIT_COUNT`（默认 1）」，用于证明张数开关真实生效。
+> 第 8 项断言「多图路径未写张数时必须被拒绝（`code: -2000`）且错误信息含数量说明」。该用例在调用生成接口前即抛错，**不消耗积分**。
+
+> **判读要点**：服务端业务错误的 HTTP 状态码仍为 `200`，错误码与说明在响应体的 `code` / `message` 字段。
+> 因此判断成败**必须看 `code`**（`0` = 成功），不能用 HTTP 状态码判断。`scripts/agent_client.py` 已按此规则识别并原样打印错误说明。
 
 ---
 
@@ -120,6 +145,10 @@ JIMENG_BENEFIT_COUNT=4 npm start     # 切回 4 张候选（4 选 1 挑选）
 
 改动：
 - `src/api/routes/index.ts`：挂载 `agent` 路由 + 根端点列出 `/v1/agent/generate`
-- `src/api/builders/payload-builder.ts`：`getBenefitCount` 读 `JIMENG_BENEFIT_COUNT`
-- `src/api/controllers/images.ts`：poller `expectedItemCount` 读 `JIMENG_BENEFIT_COUNT`（与上式同源，防挂起）
+- `src/api/builders/payload-builder.ts`：`getBenefitCount` 读 `JIMENG_BENEFIT_COUNT`（默认 `1`）
+- `src/api/controllers/images.ts`：
+  - poller `expectedItemCount` 读 `JIMENG_BENEFIT_COUNT`（与上式同源，防挂起）
+  - **多图路径新增 `parseMultiImageCount()`，强制提示词显式写明张数；缺数量直接抛 `code: -2000` 并给出写法规约**（不再隐式兜底 4 张）
+- `scripts/agent_client.py`：识别服务端业务错误码（`code != 0`）并原样打印说明；`scenes` 为空时以非零退出，避免错误被静默吞掉
+- `verify.sh`：新增第 8 项「多图缺数量必须被拒绝且给出数量说明」
 - `Dockerfile`：生产阶段加 `py3-pillow` + 拷贝 `scripts/` + 注入 5 个 ENV
