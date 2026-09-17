@@ -9,6 +9,10 @@
 #   BASE_URL 默认 http://localhost:5100
 #   TOKEN    可选；不传则跳过需要鉴权的生成类用例（仅跑健康检查/只读端点）
 #
+# 张数开关校验：第 7 项断言「单次生成张数 == JIMENG_BENEFIT_COUNT（默认 1）」。
+#   若服务以其他值启动（如 JIMENG_BENEFIT_COUNT=4），请以同值 export 后再跑本脚本，
+#   否则该项会如实报错——那恰恰说明开关生效了。
+#
 # 退出码：0 = 全部通过；非 0 = 有失败项。
 set -uo pipefail
 
@@ -49,6 +53,29 @@ if [ -n "$TOKEN" ] && command -v python3 >/dev/null 2>&1; then
     [ "$N" -ge 1 ] && ok "agent 生成并落盘 $N 张" || no "agent 生成未落盘"
   else no "agent 生成失败"; fi
   rm -rf ./verify_out
+else
+  echo "  (跳过：未提供 TOKEN 或缺少 python3)"; fi
+
+echo "== 7. 张数开关生效（单次生成张数应 == JIMENG_BENEFIT_COUNT，默认 1）=="
+if [ -n "$TOKEN" ] && command -v python3 >/dev/null 2>&1; then
+  EXPECT="${JIMENG_BENEFIT_COUNT:-1}"
+  RESP=$(curl -fsS --noproxy '*' -X POST "$BASE/v1/images/generations" \
+    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d '{"model":"jimeng-4.0","prompt":"一只白猫坐在窗台","ratio":"1:1","resolution":"1k"}' 2>/dev/null)
+  N=$(printf '%s' "$RESP" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('-1'); raise SystemExit
+items = d.get('data') or d.get('images') or []
+print(len(items) if isinstance(items, list) else '-1')
+" 2>/dev/null)
+  if [ "$N" = "$EXPECT" ]; then
+    ok "单次生成返回 $N 张，与 JIMENG_BENEFIT_COUNT=$EXPECT 一致"
+  else
+    no "单次生成返回 ${N:-?} 张，期望 $EXPECT 张（开关未生效或服务未按预期启动）"
+  fi
 else
   echo "  (跳过：未提供 TOKEN 或缺少 python3)"; fi
 
