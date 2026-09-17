@@ -4,6 +4,7 @@ import ping from "./ping.ts";
 import token from './token.js';
 import models from './models.ts';
 import videos from './videos.ts';
+import agent from "./agent.ts";
 
 export default [
     {
@@ -20,6 +21,7 @@ export default [
                         compositions: '/v1/images/compositions',
                         videos: '/v1/videos/generations',
                         models: '/v1/models',
+                        agent: '/v1/agent/generate',
                         health: '/ping'
                     }
                 };
@@ -30,5 +32,6 @@ export default [
     ping,
     token,
     models,
-    videos
+    videos,
+    agent
 ];
