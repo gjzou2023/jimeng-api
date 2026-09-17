@@ -11,7 +11,8 @@ import { uploadImageFromUrl, uploadImageBuffer } from "@/lib/image-uploader.ts";
 import { extractImageUrls } from "@/lib/image-utils.ts";
 import {
   resolveResolution,
-  getBenefitCount,
+  getImageCountPerRequest,
+  MAX_IMAGE_COUNT_PER_REQUEST,
   buildCoreParam,
   buildMetricsExtra,
   buildDraftContent,
@@ -363,11 +364,16 @@ async function generateImagesInternal(
   }
 
   // 检查是否为多图生成模式 (jimeng-4.0/jimeng-4.1/jimeng-4.5 支持)
+  // 「是否存在张数写法」由本文件 parseMultiImageCount() 统一判定（不再在此另写正则，避免两处漂移）。
+  // 注意这里判断的是 state !== "absent"（是否"出现"写法）而非"解析是否合法"：
+  // 这样「41张」这类超限写法也会进入多图分支，由 generateJimeng4xMultiImages 给出明确的超限报错，
+  // 而不会悄悄退化成单图路径、把用户写的数量默默忽略掉。
+  const multiImageCountState = parseMultiImageCount(prompt).state;
   const isJimeng4xMultiImage = ['jimeng-4.0', 'jimeng-4.1', 'jimeng-4.5'].includes(userModel) && (
     prompt.includes("连续") ||
     prompt.includes("绘本") ||
     prompt.includes("故事") ||
-    /\d+张/.test(prompt)
+    multiImageCountState !== "absent"
   );
 
   if (isJimeng4xMultiImage) {
@@ -436,9 +442,10 @@ async function generateImagesInternal(
   const poller = new SmartPoller({
     maxPollCount: 900,
     pollInterval: 10000, // 10秒轮询间隔
-    // 张数开关：默认 1，设 JIMENG_BENEFIT_COUNT=4 切回 4 张候选。
-    // 必须与 payload-builder.ts 的 getBenefitCount() 同源且同默认，否则会空等导致轮询挂起。
-    expectedItemCount: Number(process.env.JIMENG_BENEFIT_COUNT) || 1,
+    // 张数开关：默认 1，设 JIMENG_BENEFIT_COUNT=4 切回 4 张候选（上限 40）。
+    // 必须与 buildCoreParam 的 benefitCount 同源——两处都调用 getImageCountPerRequest()，
+    // 原本两处各读一遍 env 的写法已收敛，杜绝「生成 N 张却等 M 张」的轮询挂起。
+    expectedItemCount: getImageCountPerRequest(),
     type: 'image',
     timeoutSeconds: 1800 // 30 分钟超时
   });
@@ -499,20 +506,94 @@ async function generateImagesInternal(
   return imageUrls;
 }
 
+/** 全角数字 → 半角（中文输入法常见），便于统一匹配："４张" 等价于 "4张" */
+function normalizeFullWidthDigits(text: string): string {
+  return text.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+}
+
+/** 中文数字 → 整数（支持 1-99 常用写法：四 / 十 / 十二 / 二十 / 二十四） */
+function cnNumeralToInt(raw: string): number | null {
+  const DIGITS: Record<string, number> = {
+    一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
+  };
+  if (raw === "十") return 10;
+  const tensIdx = raw.indexOf("十");
+  if (tensIdx === -1) {
+    return raw.length === 1 && DIGITS[raw] !== undefined ? DIGITS[raw] : null;
+  }
+  const tens = raw.slice(0, tensIdx) === "" ? 1 : DIGITS[raw.slice(0, tensIdx)];
+  const ones = raw.slice(tensIdx + 1) === "" ? 0 : DIGITS[raw.slice(tensIdx + 1)];
+  if (tens === undefined || ones === undefined) return null;
+  return tens * 10 + ones;
+}
+
 /**
- * 解析多图模式的目标张数。
- *
- * 规范：多图提示词必须显式写明「N张」（N 为正整数），本函数不提供隐式默认值。
- * 与 generateImages 中的多图触发判断共用同一正则 (/(\d+)张/)，保证"是否多图"与"取几张"同源，
- * 不会出现"判定为多图却解析不出张数"以外的偏差。
- *
- * @returns 合法张数；未写明或非法（0 / 非数字）时返回 null
+ * 序数 / 指代标记。
+ * 若数量写法之前 1-2 个字符内出现这些标记，则该写法描述的是"顺序/指代"而不是"总张数"，
+ * 如「第一张」「最后一张」「另一张」「这一张」。
+ * 取 2 字符窗口是为了覆盖「这**是**一张」这类中间插了动词的写法（只看前 1 个字符会漏判）。
  */
-function parseMultiImageCount(prompt: string): number | null {
-  const matched = prompt.match(/(\d+)张/);
-  if (!matched) return null;
-  const count = parseInt(matched[1], 10);
-  return Number.isInteger(count) && count >= 1 ? count : null;
+const ORDINAL_MARKERS = /[第这那前后每另外某]/;
+
+/** 数量写法是否处于序数/指代语境 */
+function isOrdinalContext(text: string, startIdx: number): boolean {
+  return ORDINAL_MARKERS.test(text.slice(Math.max(0, startIdx - 2), startIdx));
+}
+
+/**
+ * 「张数写法」的唯一定义源 —— 多图触发判断与取值共用本表。
+ * ⚠️ 禁止在其他位置另写张数正则：两处不同步就会出现「判定为多图却取不到张数」这类漂移缺陷
+ * （历史上正是取值处另写了一遍正则，才把隐式兜底 4 张藏了进去）。
+ *
+ * 位置不限：写法出现在提示词**任意位置**、出现一次即可。形式支持：
+ *   ① 阿拉伯数字 + 张   「生成4张连续的猫咪插画」「生成不同风格的猫咪插画，4张」「共 4 张」
+ *   ② 键值式            「张数:4」「张数：4」「数量 4」「图片数=4」
+ *   ③ 中文数字 + 张      「四张」「十二张」「二十四张」（1-99）
+ *   ④ 全角数字          「４张」—— 先归一化为半角再按 ①②③ 匹配
+ *
+ * 序数 / 指代不算数量说明：见 isOrdinalContext。
+ */
+const MULTI_IMAGE_COUNT_PATTERNS: Array<{
+  re: RegExp;
+  toInt: (raw: string) => number | null;
+  rejectIfOrdinal?: boolean;
+}> = [
+  { re: /(\d+)\s*张/g, toInt: (raw) => parseInt(raw, 10), rejectIfOrdinal: true },
+  { re: /(?:张数|数量|图片数|生成数)\s*[:：=＝]?\s*(\d+)/g, toInt: (raw) => parseInt(raw, 10) },
+  { re: /([一二三四五六七八九十两]{1,3})\s*张/g, toInt: cnNumeralToInt, rejectIfOrdinal: true },
+];
+
+/**
+ * 解析多图模式的目标张数 —— 多图触发判断与取值共用的唯一入口。
+ *
+ * 规范：多图提示词必须显式写明数量说明，本函数**不提供隐式默认值**
+ * （上游原行为是无匹配时兜底 4 张，已在 fork 中移除）。
+ * 数量说明的位置与形式不限，详见 MULTI_IMAGE_COUNT_PATTERNS。
+ *
+ * @returns state "absent"       未出现任何数量说明
+ *                "invalid"      出现了数量说明但无法解析成整数
+ *                "out-of-range" 已解析出整数，但不在 1..MAX_IMAGE_COUNT_PER_REQUEST 内
+ *                "ok"           合法，count ∈ [1, 40]
+ */
+function parseMultiImageCount(prompt: string):
+  | { state: "absent" }
+  | { state: "invalid" }
+  | { state: "out-of-range"; count: number }
+  | { state: "ok"; count: number } {
+  const text = normalizeFullWidthDigits(prompt);
+  for (const { re, toInt, rejectIfOrdinal } of MULTI_IMAGE_COUNT_PATTERNS) {
+    for (const matched of text.matchAll(re)) {
+      const startIdx = matched.index ?? 0;
+      // 序数/指代（「第一张」「最后一张」「这是一张」）跳过，继续找同一条写法的下一处出现
+      if (rejectIfOrdinal && isOrdinalContext(text, startIdx)) continue;
+
+      const count = toInt(matched[1]);
+      if (count === null || !Number.isInteger(count)) return { state: "invalid" };
+      if (count < 1 || count > MAX_IMAGE_COUNT_PER_REQUEST) return { state: "out-of-range", count };
+      return { state: "ok", count };
+    }
+  }
+  return { state: "absent" };
 }
 
 /**
@@ -543,17 +624,29 @@ async function generateJimeng4xMultiImages(
   const resolutionResult = resolveResolution(userModel, regionInfo, resolution, ratio);
 
   // 张数必须由提示词显式指定，不再隐式兜底 4 张（原行为：无匹配时默认生成 4 张）。
-  // 缺失或非法时抛参数错误并给出写法规约，避免误生成造成非预期计费。
-  const targetImageCount = parseMultiImageCount(prompt);
-  if (targetImageCount === null) {
+  // 缺数量 / 无法解析 / 超上限 → 抛参数错误并给出写法说明与数值范围，避免误生成造成非预期计费。
+  const countCheck = parseMultiImageCount(prompt);
+  if (countCheck.state === "out-of-range") {
     throw new APIException(
       EX.API_REQUEST_PARAMS_INVALID,
-      "多图模式必须在提示词中显式指定张数：请写明「N张」（N 为正整数，如 4张），"
-      + "例如「生成4张连续的猫咪插画」。"
-      + "本次提示词命中了多图关键词（连续 / 绘本 / 故事）但未包含有效张数，已停止生成以避免非预期计费。"
+      `多图张数超出上限：本次从提示词解析到 ${countCheck.count} 张，单次上限为 ${MAX_IMAGE_COUNT_PER_REQUEST} 张，已停止生成。`
+      + `请把数量改为 1-${MAX_IMAGE_COUNT_PER_REQUEST} 之间的整数（如「${MAX_IMAGE_COUNT_PER_REQUEST}张」），或分批多次生成。`
+      + "（多图为同步轮询，单次张数过大会长时间占用请求并放大积分消耗，故设上限。）"
+    );
+  }
+  if (countCheck.state !== "ok") {
+    const hitKeywords = ["连续", "绘本", "故事"].filter((k) => prompt.includes(k));
+    throw new APIException(
+      EX.API_REQUEST_PARAMS_INVALID,
+      "多图模式必须在提示词中写明数量，位置与形式不限（写在句中句末均可），例如："
+      + "「生成4张连续的猫咪插画」，或「生成不同风格的猫咪插画，4张」。"
+      + "也支持「张数:4」「数量：4」「四张」「４张」等写法。"
+      + `本次提示词${hitKeywords.length ? `命中了多图关键词（${hitKeywords.join(" / ")}）` : "使用了多图模型 jimeng-4.x"}，`
+      + `但未包含可识别的数量说明，已停止生成以避免非预期计费（合法范围 1-${MAX_IMAGE_COUNT_PER_REQUEST} 张）。`
       + "若只想生成 1 张，请改用 jimeng-5.0 等单图模型，或去掉提示词中的多图关键词。"
     );
   }
+  const targetImageCount = countCheck.count;
 
   logger.info(`使用 多图生成: ${targetImageCount}张图片 ${resolutionResult.width}x${resolutionResult.height} 精细度: ${sampleStrength}`);
 
