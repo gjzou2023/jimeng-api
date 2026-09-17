@@ -500,6 +500,22 @@ async function generateImagesInternal(
 }
 
 /**
+ * 解析多图模式的目标张数。
+ *
+ * 规范：多图提示词必须显式写明「N张」（N 为正整数），本函数不提供隐式默认值。
+ * 与 generateImages 中的多图触发判断共用同一正则 (/(\d+)张/)，保证"是否多图"与"取几张"同源，
+ * 不会出现"判定为多图却解析不出张数"以外的偏差。
+ *
+ * @returns 合法张数；未写明或非法（0 / 非数字）时返回 null
+ */
+function parseMultiImageCount(prompt: string): number | null {
+  const matched = prompt.match(/(\d+)张/);
+  if (!matched) return null;
+  const count = parseInt(matched[1], 10);
+  return Number.isInteger(count) && count >= 1 ? count : null;
+}
+
+/**
  * jimeng-4.0/jimeng-4.1/jimeng-4.5 多图生成
  */
 async function generateJimeng4xMultiImages(
@@ -526,7 +542,18 @@ async function generateJimeng4xMultiImages(
   // 使用 payload-builder 处理分辨率
   const resolutionResult = resolveResolution(userModel, regionInfo, resolution, ratio);
 
-  const targetImageCount = prompt.match(/(\d+)张/) ? parseInt(prompt.match(/(\d+)张/)[1]) : 4;
+  // 张数必须由提示词显式指定，不再隐式兜底 4 张（原行为：无匹配时默认生成 4 张）。
+  // 缺失或非法时抛参数错误并给出写法规约，避免误生成造成非预期计费。
+  const targetImageCount = parseMultiImageCount(prompt);
+  if (targetImageCount === null) {
+    throw new APIException(
+      EX.API_REQUEST_PARAMS_INVALID,
+      "多图模式必须在提示词中显式指定张数：请写明「N张」（N 为正整数，如 4张），"
+      + "例如「生成4张连续的猫咪插画」。"
+      + "本次提示词命中了多图关键词（连续 / 绘本 / 故事）但未包含有效张数，已停止生成以避免非预期计费。"
+      + "若只想生成 1 张，请改用 jimeng-5.0 等单图模型，或去掉提示词中的多图关键词。"
+    );
+  }
 
   logger.info(`使用 多图生成: ${targetImageCount}张图片 ${resolutionResult.width}x${resolutionResult.height} 精细度: ${sampleStrength}`);
 
