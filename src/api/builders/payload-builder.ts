@@ -111,13 +111,35 @@ export function resolveResolution(
 }
 
 /**
- * benefitCount 规则
- * - 生图模式：默认 1 张（读 JIMENG_BENEFIT_COUNT，未设置时回退 1）
- * - 设 JIMENG_BENEFIT_COUNT=4 可切回上游行为（生成 4 张候选、4 选 1 挑选）
- * - 多图模式: 不加
+ * 单次请求允许的图片张数上限（同时约束单图路径的 benefitCount 与多图路径的提示词张数）。
  *
- * 注意：本处的默认值必须与 images.ts 中 SmartPoller 的 expectedItemCount 保持一致，
- * 否则会出现「只生成 N 张、却轮询等待 M 张」导致请求挂起。
+ * 设上限的原因：两条路径都是同步轮询（超时 30 分钟），张数过大会长时间占用请求并放大积分消耗。
+ * 单图路径上游即梦 UI 的可选范围是 1-8，本上限 40 远高于该范围，正常使用不会触达，
+ * 只用于拦住 999 张这类笔误/异常值。
+ */
+export const MAX_IMAGE_COUNT_PER_REQUEST = 40;
+
+/**
+ * 单图路径「每请求生成张数」的唯一读取点。
+ *
+ * - 默认 1 张（按排查报告"修正与补充"要求：每次只生成 1 张，省约 3/4 计费）
+ * - 设 JIMENG_BENEFIT_COUNT=4 可切回上游行为（生成 4 张候选、4 选 1 挑选）
+ * - 未设置 / 非数字 / 小于 1 → 回退 1；超过 MAX_IMAGE_COUNT_PER_REQUEST → 按上限截断
+ *
+ * ⚠️ 本函数是「单图路径张数」的唯一来源：buildCoreParam 的 benefitCount 与
+ * images.ts 中 SmartPoller 的 expectedItemCount 都必须调用它。
+ * 两处若各自读一遍环境变量，就会出现「只生成 N 张、却轮询等待 M 张」的请求挂起。
+ */
+export function getImageCountPerRequest(): number {
+  const configured = Number(process.env.JIMENG_BENEFIT_COUNT);
+  const count = Number.isFinite(configured) && configured >= 1 ? Math.floor(configured) : 1;
+  return Math.min(count, MAX_IMAGE_COUNT_PER_REQUEST);
+}
+
+/**
+ * benefitCount 规则
+ * - 生图模式：取 getImageCountPerRequest()（默认 1 张）
+ * - 多图模式：不加（张数由提示词决定，见 images.ts 的 parseMultiImageCount）
  */
 export function getBenefitCount(
   userModel: string,
@@ -125,10 +147,7 @@ export function getBenefitCount(
   isMultiImage: boolean = false
 ): number | undefined {
   if (isMultiImage) return undefined;
-
-  // 默认 1（按排查报告"修正与补充"要求：每次只生成 1 张，省约 3/4 计费）。
-  // 设置 JIMENG_BENEFIT_COUNT（如 4）可覆盖回多张候选，便于挑选。
-  return Number(process.env.JIMENG_BENEFIT_COUNT) || 1;
+  return getImageCountPerRequest();
 }
 
 export type GenerateMode = "text2img" | "img2img";
