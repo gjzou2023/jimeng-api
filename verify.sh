@@ -12,8 +12,9 @@
 # 张数开关校验：第 7 项断言「单次生成张数 == JIMENG_BENEFIT_COUNT（默认 1）」。
 #   若服务以其他值启动（如 JIMENG_BENEFIT_COUNT=4），请以同值 export 后再跑本脚本，
 #   否则该项会如实报错——那恰恰说明开关生效了。
-# 第 8 项断言「多图路径（jimeng-4.x + 连续/绘本/故事关键词）未写张数时必须被拒绝，
-#   且错误信息含数量说明」。该用例在调用生成接口前即抛错，不消耗积分。
+# 第 8 项断言「多图路径（jimeng-4.x + 连续/绘本/故事关键词）未写数量时必须被拒绝，
+#   且错误信息含数量说明、并写明"位置与形式不限"与示例」。该用例在调用生成接口前即抛错，不消耗积分。
+# 第 9 项断言「多图数量超过上限 40 张时必须被拒绝，且错误信息含上限数值」。同样不消耗积分。
 #
 # 退出码：0 = 全部通过；非 0 = 有失败项。
 set -uo pipefail
@@ -97,16 +98,57 @@ except Exception:
 if not isinstance(d, dict):
     print("PARSE_FAIL"); raise SystemExit
 code = d.get("code")
-if code == -2000:
-    msg = str(d.get("message") or "")
-    print("PASS" if "张" in msg else "NO_GUIDE")
+if code != -2000:
+    print("NOT_REJECTED:" + str(code)); raise SystemExit
+msg = str(d.get("message") or "")
+if "张" not in msg:
+    print("NO_COUNT_GUIDE")
+elif "位置与形式不限" not in msg:
+    print("NO_FORM_GUIDE")
+elif "例如" not in msg:
+    print("NO_EXAMPLE")
 else:
-    print("NOT_REJECTED:" + str(code))
+    print("PASS")
 ' 2>/dev/null)
   case "$V8" in
-    PASS)      ok "多图缺数量被拒绝，且错误信息含数量说明 (code=-2000)" ;;
-    NO_GUIDE)  no "多图缺数量被拒绝，但错误信息未含数量说明" ;;
-    *)         no "多图缺数量未被拒绝 (${V8:-无响应/无法解析})" ;;
+    PASS)           ok "多图缺数量被拒绝，且说明含数量、形式不限与示例 (code=-2000)" ;;
+    NO_COUNT_GUIDE) no "多图缺数量被拒绝，但说明未提及数量" ;;
+    NO_FORM_GUIDE)  no "多图缺数量被拒绝，但说明未写明「位置与形式不限」" ;;
+    NO_EXAMPLE)     no "多图缺数量被拒绝，但说明未给出写法示例" ;;
+    *)              no "多图缺数量未被拒绝 (${V8:-无响应/无法解析})" ;;
+  esac
+else
+  echo "  (跳过：未提供 TOKEN 或缺少 python3)"; fi
+
+echo "== 9. 多图数量上限（超过 40 张必须被拒绝并说明上限）=="
+if [ -n "$TOKEN" ] && command -v python3 >/dev/null 2>&1; then
+  R9=$(curl -sS --noproxy '*' -X POST "$BASE/v1/images/generations" \
+    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d '{"model":"jimeng-4.0","prompt":"生成41张连续的猫咪插画","ratio":"1:1","resolution":"1k"}' 2>/dev/null)
+  V9=$(printf '%s' "$R9" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("PARSE_FAIL"); raise SystemExit
+if not isinstance(d, dict):
+    print("PARSE_FAIL"); raise SystemExit
+code = d.get("code")
+if code != -2000:
+    print("NOT_REJECTED:" + str(code)); raise SystemExit
+msg = str(d.get("message") or "")
+if "40" not in msg:
+    print("NO_LIMIT_VALUE")
+elif "上限" not in msg:
+    print("NO_LIMIT_WORD")
+else:
+    print("PASS")
+' 2>/dev/null)
+  case "$V9" in
+    PASS)           ok "超上限 41 张被拒绝，且说明含上限数值 40 (code=-2000)" ;;
+    NO_LIMIT_VALUE) no "超上限未被拒绝得清楚：说明未含上限数值 40" ;;
+    NO_LIMIT_WORD)  no "超上限被拒绝，但说明未点明「上限」" ;;
+    *)              no "超上限未被拒绝 (${V9:-无响应/无法解析})" ;;
   esac
 else
   echo "  (跳过：未提供 TOKEN 或缺少 python3)"; fi
