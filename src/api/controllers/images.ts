@@ -436,7 +436,9 @@ async function generateImagesInternal(
   const poller = new SmartPoller({
     maxPollCount: 900,
     pollInterval: 10000, // 10秒轮询间隔
-    expectedItemCount: Number(process.env.JIMENG_BENEFIT_COUNT) || 4,
+    // 张数开关：默认 1，设 JIMENG_BENEFIT_COUNT=4 切回 4 张候选。
+    // 必须与 payload-builder.ts 的 getBenefitCount() 同源且同默认，否则会空等导致轮询挂起。
+    expectedItemCount: Number(process.env.JIMENG_BENEFIT_COUNT) || 1,
     type: 'image',
     timeoutSeconds: 1800 // 30 分钟超时
   });
