@@ -112,8 +112,12 @@ export function resolveResolution(
 
 /**
  * benefitCount 规则
- * - 生图模式统一返回 4
+ * - 生图模式：默认 1 张（读 JIMENG_BENEFIT_COUNT，未设置时回退 1）
+ * - 设 JIMENG_BENEFIT_COUNT=4 可切回上游行为（生成 4 张候选、4 选 1 挑选）
  * - 多图模式: 不加
+ *
+ * 注意：本处的默认值必须与 images.ts 中 SmartPoller 的 expectedItemCount 保持一致，
+ * 否则会出现「只生成 N 张、却轮询等待 M 张」导致请求挂起。
  */
 export function getBenefitCount(
   userModel: string,
@@ -122,9 +126,9 @@ export function getBenefitCount(
 ): number | undefined {
   if (isMultiImage) return undefined;
 
-  // 默认 4（与上游行为一致）；设置 JIMENG_BENEFIT_COUNT=1 可让每次请求只生成 1 张
-  // （批量系列图场景所需，避免单场景生成 4 张造成 4 倍计费）。
-  return Number(process.env.JIMENG_BENEFIT_COUNT) || 4;
+  // 默认 1（按排查报告"修正与补充"要求：每次只生成 1 张，省约 3/4 计费）。
+  // 设置 JIMENG_BENEFIT_COUNT（如 4）可覆盖回多张候选，便于挑选。
+  return Number(process.env.JIMENG_BENEFIT_COUNT) || 1;
 }
 
 export type GenerateMode = "text2img" | "img2img";
