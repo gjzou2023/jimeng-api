@@ -30,8 +30,8 @@ RUN npm run build
 # 生产阶段
 FROM node:18-alpine AS production
 
-# 安装健康检查工具
-RUN apk add --no-cache wget
+# 安装健康检查工具 + Python3/Pillow（去水印功能需要）
+RUN apk add --no-cache wget python3 py3-pillow
 
 # 创建非root用户
 RUN addgroup -g 1001 -S nodejs && \
@@ -51,13 +51,21 @@ RUN npm ci --omit=dev --registry https://registry.npmmirror.com/ && \
 # 从构建阶段复制构建产物
 COPY --from=builder --chown=jimeng:nodejs /app/dist ./dist
 COPY --from=builder --chown=jimeng:nodejs /app/configs ./configs
+# 复制技能模板与去水印脚本（运行时需要，批量系列图 / 去水印功能依赖）
+COPY --from=builder --chown=jimeng:nodejs /app/scripts ./scripts
 
 # 创建应用需要的目录并设置权限
-RUN mkdir -p /app/logs /app/tmp && \
-    chown -R jimeng:nodejs /app/logs /app/tmp
+RUN mkdir -p /app/logs /app/tmp /app/output && \
+    chown -R jimeng:nodejs /app/logs /app/tmp /app/output
 
 # 设置环境变量
 ENV SERVER_PORT=5100
+# 批量系列图：每请求生成 1 张（避免 4 倍计费）；输出目录；去水印默认 auto（CDN 图通常无水印，检测到才处理）
+ENV JIMENG_BENEFIT_COUNT=1
+ENV JIMENG_AGENT_OUT_DIR=/app/output
+ENV JIMENG_STRIP_WM=auto
+ENV JIMENG_PYTHON=python3
+ENV JIMENG_WM_SCRIPT=/app/scripts/watermark_cli.py
 
 # 切换到非root用户
 USER jimeng
