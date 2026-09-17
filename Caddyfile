@@ -1,0 +1,28 @@
+# Caddy 反向代理配置（可选）
+# 将 80/443 的域名流量转发到本地 5100 端口的 jimeng-api 容器，并自动签发 TLS。
+#
+# 用法：
+#   caddy run --config Caddyfile
+# 或作为 systemd 服务 / Docker 容器运行。
+
+{$JIMENG_DOMAIN:localhost} {
+    # 自动 HTTPS（需公网域名 + 80/443 放行）
+    reverse_proxy localhost:5100
+
+    # 若使用 Cloudflare/其他代理，可关闭自动 HTTPS：
+    # tls internal
+    # 或：
+    # tls off
+
+    header {
+        # 基础安全头
+        -Server
+        Strict-Transport-Security "max-age=31536000;"
+    }
+
+    # 健康检查透传
+    @ping path /ping
+    handle @ping {
+        reverse_proxy localhost:5100
+    }
+}
