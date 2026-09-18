@@ -3,6 +3,8 @@
 ====================================================================
 
 适用于本地/容器外触发批量生成，并把每项按 NN_标题.png|mp4 命名落盘。
+⚠️ 2026-09-18：落盘为**全量**——上游单请求固定产出 4 张，多张时命名 `NN_标题_01.png …`；
+   可用环境变量 `JIMENG_AGENT_KEEP`（默认 0 = 全存）限制每场景落盘张数。
 依赖：仅 Python 标准库（urllib）；如需去水印需本目录 watermark_cli.py + Pillow。
 
 三种交付形态（互不干扰）：
@@ -85,9 +87,13 @@ def _download(url: str, dest: Path) -> None:
         dest.write_bytes(resp.read())
 
 
-def _safe(title: str, index: int, ext: str = "png") -> str:
+def _safe(title: str, index: int, ext: str = "png", seq: int | None = None) -> str:
+    """生成落盘文件名 `NN_标题.ext`；同场景多张产出时追加 `_NN` 序号后缀。"""
     base = re.sub(r"[^\w一-龥-]+", "_", title or f"s{index}")[:40]
-    return f"{str(index).zfill(2)}_{base}.{ext.lstrip('.')}"
+    stem = f"{str(index).zfill(2)}_{base}"
+    if seq:
+        stem += f"_{str(seq).zfill(2)}"
+    return f"{stem}.{ext.lstrip('.')}"
 
 
 def _run_watermark(path: Path) -> None:
@@ -107,21 +113,40 @@ def _ext_for(kind: str) -> str:
 
 
 def _download_items(items, out: Path, kind: str, strip_wm: bool) -> int:
-    """把 [{index,title,url,error}] 逐项下载落盘。返回成功数。"""
+    """把 [{index,title,url,urls,error}] 逐项**全量**下载落盘。返回成功数。
+
+    ⚠️ 2026-09-18 变更（与服务端 `src/agent/tasks.ts` 的 `saveSceneToDisk` 对齐）：
+    上游单图路径**每次请求固定产出 4 张**，服务端响应已带 `urls: string[]` 全量字段。
+    旧实现只取 `url`（首图）→ 其余 3 张**已生成、已计费**却被丢弃（G-2）。
+    现优先取 `urls` 全量（缺失时回退 `url`，向后兼容）；多张命名 `NN_标题_01.png …`，
+    恰好 1 张时保持旧命名 `NN_标题.png`。环境变量 `JIMENG_AGENT_KEEP`
+    （默认 0 = 全存）可限制每场景落盘张数。
+    """
     out.mkdir(parents=True, exist_ok=True)
     ext = _ext_for(kind)
+    try:
+        keep = int(os.environ.get("JIMENG_AGENT_KEEP", "0") or "0")
+    except ValueError:
+        keep = 0
     n_ok = 0
     for sc in items:
-        if not sc.get("url"):
+        urls = sc.get("urls") or ([sc["url"]] if sc.get("url") else [])
+        urls = [u for u in urls if u]
+        if not urls:
             print(f"[跳过] #{sc.get('index')} {sc.get('title')}: {sc.get('error')}", file=sys.stderr)
             continue
-        fn = out / _safe(sc.get("title", "s"), sc.get("index", 0), ext)
-        _download(sc["url"], fn)
-        # 去水印仅对图片有意义（视频不裁剪）
-        if strip_wm and kind == "image":
-            _run_watermark(fn)
-        print(f"[OK] {fn}")
-        n_ok += 1
+        if keep > 0:
+            urls = urls[:keep]
+        multi = len(urls) > 1
+        for k, u in enumerate(urls, start=1):
+            fn = out / _safe(sc.get("title", "s"), sc.get("index", 0), ext,
+                             seq=(k if multi else None))
+            _download(u, fn)
+            # 去水印仅对图片有意义（视频不裁剪）
+            if strip_wm and kind == "image":
+                _run_watermark(fn)
+            print(f"[OK] {fn}")
+            n_ok += 1
     return n_ok
 
 
@@ -217,7 +242,9 @@ def main() -> int:
     ap.add_argument("--wait", action="store_true",
                     help="异步提交后轮询到任务结束并下载（隐含 --async）")
     ap.add_argument("--interval", type=int, default=5, help="异步轮询间隔（秒），默认 5")
-    ap.add_argument("--max-items", type=int, default=None, help="主动收紧本次总量上限")
+    ap.add_argument("--max-items", type=int, default=None,
+                    help="主动收紧本次总量上限（**场景数**，非图片数；"
+                         "上游单请求固定产出 4 张，故实际图片数可能为其 4 倍）")
     # ── 直出单次 ──
     ap.add_argument("--mode", choices=["single", "group"],
                     help="直出模式：single 强制单图｜group 强制组图（需配合 --prompt）")

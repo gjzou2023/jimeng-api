@@ -61,7 +61,11 @@ if [ -z "$TOKEN" ]; then
   exit $?
 fi
 
-echo "########## 第二层：轻量真实生成（断言 6 + 7，约 1-3 积分）##########"
+echo "########## 第二层：轻量真实生成（断言 6 + 7）##########"
+# 成本口径（2026-09-18 实测更正）：上游单图路径**固定产出 4 张/请求**，
+# 故本层实际 ≈ (2 场景 × 4) + (1 请求 × 4) = 12 张 ≈ 12 积分（jimeng-4.0 / 1k）。
+# 原测算"约 1-3 积分"基于"每请求出 1 张"的**已证伪**前提，勿据此做预算。
+# 分层回归详见 scripts/real_gen_verify.sh。
 
 echo "== 6. 真实 Agent 编排生成（doc → 系列图，需 TOKEN）=="
 if command -v python3 >/dev/null 2>&1; then
@@ -83,7 +87,14 @@ EOF
 else
   no "缺少 python3，无法跑 agent 生成"; fi
 
-echo "== 7. 单图张数开关（默认 1，应 == JIMENG_BENEFIT_COUNT）=="
+# ⚠️ 2026-09-18 实测更正：原断言「返回张数 == JIMENG_BENEFIT_COUNT」**已被证伪**
+#   （上游自由模式单图路径**固定产出 4 张**：jimeng-4.0 / jimeng-5.0 / nanobanana 三模型一致，
+#    显式 mode:"single" 亦无法减少；JIMENG_BENEFIT_COUNT 只写埋点区、**不控制产出**）
+#   → 旧等式恒不成立，会把"服务正常"误判为红。
+# 现按**分层判据**断言（G-5）：① 请求成功（响应可解析）② 出图成功（≥1 张）
+#   ③ 张数落在上游已知区间（1..MAX_SINGLE_IMAGE_COUNT=4），**超出即报警**（上游行为变更）。
+# 更完整的分层回归见 scripts/real_gen_verify.sh。
+echo "== 7. 单图请求出图断言（分层：请求成功 / 出图成功 / 张数在已知区间）=="
 EXPECT="${JIMENG_BENEFIT_COUNT:-1}"
 [ "$EXPECT" -gt 4 ] && EXPECT=4
 N=$(post_json "$BASE/v1/images/generations" "$TOKEN" \
@@ -97,10 +108,14 @@ except Exception:
 items = d.get('data') or d.get('images') or []
 print(len(items) if isinstance(items, list) else '-1')
 " 2>/dev/null)
-if [ "$N" = "$EXPECT" ]; then
-  ok "单次生成返回 $N 张，与 JIMENG_BENEFIT_COUNT=$EXPECT 一致（开关生效）"
+if [ -z "$N" ] || [ "$N" = "-1" ]; then
+  no "单图请求失败：响应不可解析（token 无效 / 服务未就绪 / 上游拒绝，看 fail_code）"
+elif [ "$N" -lt 1 ]; then
+  no "单图请求成功但未出图（items=0）"
+elif [ "$N" -gt 4 ]; then
+  no "单图返回 ${N} 张，超出已知上限 4 —— 上游行为可能已变更，请核对 AGENT_FEATURES.md §3"
 else
-  no "单次生成返回 ${N:-?} 张，期望 $EXPECT 张（token 无效或服务未按预期启动）"
+  ok "单图请求成功并出图 ${N} 张（上游实测区间 1..4；JIMENG_BENEFIT_COUNT=${EXPECT} 仅写埋点、不决定张数）"
 fi
 
 echo

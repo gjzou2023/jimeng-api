@@ -24,6 +24,34 @@ export interface ErrorHandlerOptions {
 }
 
 /**
+ * 上游 `fail_code` 可读映射（P1-3）。
+ *
+ * 背景：此前失败只透出 `shark not pass reject (错误码: -6)` 这类不可读信息，
+ * 定位 `fail_code=4013` 需要翻容器日志 —— 排查成本极高。本函数把它翻译成
+ * **可读原因 + 建议动作**。
+ *
+ * 收录原则（**防编造**）：
+ *  - 只收录**有实测锚点**的码，每条必须写明来源（日期 + 场景）；
+ *  - 未收录的码返回空串（由调用方按原样打印原始码），**不做任何推测**；
+ *  - 新增条目必须在来源栏附可复查证据，否则视为无效条目。
+ *
+ * | fail_code | 含义 | 建议动作 | 来源 |
+ * |---|---|---|---|
+ * | `4013` | 上游风控拒绝（账号维度或出口 IP 维度） | 换账号/换出口后**间隔 ≥30s** 重试；**禁止**同账号多 IP 快速轮试（封号风险） | 2026-09-18 Step 0 实测：JP 账号经住宅出口请求被拒，响应 `fail_code=4013`（见 `00_audit_report.md`） |
+ */
+function explainFailCode(failCode: string): string {
+  switch (failCode) {
+    case "4013":
+      return "上游风控拒绝（该账号或该出口 IP 被判定为风险）"
+        + "。建议动作：①换用其他账号，或更换出口 IP 后**间隔 ≥30 秒**再试；"
+        + "②**切勿**对同一账号在多 IP 上快速轮试（有永久封号风险）；"
+        + "③国际版账号可先改走国内（cn）通道验证是否为区域级风控。";
+    default:
+      return ""; // 未收录 → 不做推测，保留原始码由调用方打印
+  }
+}
+
+/**
  * 统一的即梦API错误处理器
  */
 export class JimengErrorHandler {
@@ -61,8 +89,20 @@ export class JimengErrorHandler {
       case '5002':
         throw new APIException(EX.API_VIDEO_GENERATION_FAILED, `[视频生成失败]: ${errmsg}`);
       
-      default:
-        throw new APIException(EX.API_REQUEST_FAILED, `[${operation}失败]: ${errmsg} (错误码: ${ret})`);
+      default: {
+        // P1-3：尝试从 data 里提取上游 fail_code，补充可读原因（取不到则跳过，不做推测）
+        const raw = response.data;
+        const fc =
+          raw && typeof raw === 'object'
+            ? (raw.fail_code ?? raw.failCode ?? raw.fail_starling_key)
+            : undefined;
+        const hasFc = fc !== undefined && fc !== null;
+        const explain = hasFc ? explainFailCode(String(fc)) : '';
+        throw new APIException(
+          EX.API_REQUEST_FAILED,
+          `[${operation}失败]: ${errmsg} (错误码: ${ret}${hasFc ? `，fail_code: ${fc}` : ''})${explain ? `。${explain}` : ''}`
+        );
+      }
     }
   }
   
@@ -145,7 +185,12 @@ export class JimengErrorHandler {
     // 没有任何结果时，记录错误并抛出异常
     logger.error(message);
     const exception = type === 'image' ? EX.API_IMAGE_GENERATION_FAILED : EX.API_VIDEO_GENERATION_FAILED;
-    throw new APIException(exception, `${typeText}生成失败，状态码: ${status}${failCode ? `，错误码: ${failCode}` : ''}`);
+    // P1-3：把上游 fail_code 翻译为可读原因 + 建议动作（未收录的码保持原样，不做推测）
+    const explain = failCode ? explainFailCode(String(failCode)) : '';
+    throw new APIException(
+      exception,
+      `${typeText}生成失败，状态码: ${status}${failCode ? `，错误码: ${failCode}` : ''}${explain ? `。${explain}` : ''}`
+    );
   }
   
   /**

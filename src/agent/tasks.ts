@@ -156,26 +156,77 @@ function runWatermark(file: string): void {
 }
 
 /**
- * 逐项落盘：把一个场景的产出下载到本地（图片按 .png、视频按 .mp4）。
+ * 每场景最多落盘几张（环境变量 `JIMENG_AGENT_KEEP`，默认 `0` = 全部落盘）。
+ *
+ * 为什么需要它：上游单图路径**每次请求固定产出 4 张**（2026-09-18 实测），
+ * 40 场景 × 4 张 × ~1MB ≈ 160MB/次（改前 40MB）。本开关是磁盘/带宽风险的唯一闸门：
+ * 设为 `1` 即恢复"每场景只留首图"的旧行为（字段层仍向后兼容，见方案 R-1）。
+ */
+function resolveKeep(): number {
+  const n = Number(process.env.JIMENG_AGENT_KEEP);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 0; // 0 / 非法 → 全部落盘
+}
+
+/**
+ * 逐项落盘：把一个场景的**全部**产出下载到本地（图片按 .png、视频按 .mp4）。
  * 同步端点与异步任务层共用本函数，避免两处实现漂移。
+ *
+ * ⚠️ 2026-09-18 变更（P0-3/P0-4，取代旧实现）：
+ * 旧实现只取 `sc.url`（首图）→ 上游**同一请求已生成、已计费**的其余 3 张被静默丢弃。
+ * 现改为遍历 `sc.urls ?? [sc.url]` 全量落盘：
+ *   - 多张 → `NN_标题_01.png … NN_标题_NN.png`；**恰好 1 张 → 保持旧命名** `NN_标题.png`
+ *     （不破坏既有消费方的路径假设，属向后兼容取舍）；
+ *   - `sc.file` 仍为首图路径（向后兼容）；新增 `sc.files` = 全部落盘路径；
+ *   - 单张下载失败只告警并**继续下一张**（不因一张失败丢掉整个场景）；
+ *     全部失败才抛错，交由调用方记录；
+ *   - 落盘张数上限由 `JIMENG_AGENT_KEEP` 控制（默认 0 = 全存）。
  */
 export async function saveSceneToDisk(
   sc: AgentSceneResult,
   outDir: string,
   stripWm: boolean
 ): Promise<void> {
-  if (!sc.url || !outDir) return;
+  if (!outDir) return;
+  const urls = (sc.urls && sc.urls.length ? sc.urls : sc.url ? [sc.url] : []).filter((u) => !!u);
+  if (!urls.length) return;
+
+  const keep = resolveKeep();
+  const picked = keep > 0 ? urls.slice(0, keep) : urls;
+  if (picked.length < urls.length) {
+    logger.info(
+      `[agent] ${sc.title}: 上游产出 ${urls.length} 张，按 JIMENG_AGENT_KEEP=${keep} 仅保留前 ${picked.length} 张`
+    );
+  }
+
   fs.mkdirSync(outDir, { recursive: true });
-  const name = safeName(sc.title, sc.index).replace(/\.png$/, sc.kind === "video" ? ".mp4" : ".png");
-  const file = path.join(outDir, name);
-  const resp = await fetch(sc.url);
-  if (!resp.ok) throw new Error(`下载 CDN 文件失败 ${resp.status}`);
-  const buf = Buffer.from(await resp.arrayBuffer());
-  fs.writeFileSync(file, buf);
-  sc.file = file;
-  // 去水印只对图片有意义（视频链路不做像素裁剪）
-  if (stripWm && sc.kind !== "video") runWatermark(file);
-  logger.info(`[agent] 已保存 ${file}`);
+  const base = safeName(sc.title, sc.index).replace(/\.png$/, sc.kind === "video" ? ".mp4" : ".png");
+  const ext = sc.kind === "video" ? ".mp4" : ".png";
+  const stem = base.replace(/\.(png|mp4)$/, "");
+
+  const files: string[] = [];
+  for (let k = 0; k < picked.length; k++) {
+    // 多张 → 带序号；恰好 1 张 → 沿用旧命名（向后兼容）
+    const name = picked.length > 1 ? `${stem}_${String(k + 1).padStart(2, "0")}${ext}` : base;
+    const file = path.join(outDir, name);
+    try {
+      const resp = await fetch(picked[k]);
+      if (!resp.ok) throw new Error(`下载 CDN 文件失败 ${resp.status}`);
+      const buf = Buffer.from(await resp.arrayBuffer());
+      fs.writeFileSync(file, buf);
+      files.push(file);
+      // 去水印只对图片有意义（视频链路不做像素裁剪）
+      if (stripWm && sc.kind !== "video") runWatermark(file);
+      logger.info(`[agent] 已保存 ${file}`);
+    } catch (e: any) {
+      logger.warn(
+        `[agent] ${sc.title} 第 ${k + 1}/${picked.length} 张保存失败（继续下一张）: ${e?.message || e}`
+      );
+    }
+  }
+
+  if (!files.length) throw new Error(`全部 ${picked.length} 张下载失败（出图成功但落盘失败）`);
+  sc.file = files[0]; // 向后兼容：首图路径
+  sc.files = files;   // 新增：全部落盘路径
 }
 
 /** 创建任务（同步返回视图），并**立即异步启动**；调用方不等待完成 */
@@ -228,8 +279,9 @@ async function runTask(id: string): Promise<void> {
           rec.progress.done = done;
           rec.progress.succeeded = r.url ? rec.progress.succeeded + 1 : rec.progress.succeeded;
           rec.progress.failed = r.url ? rec.progress.failed : rec.progress.failed + 1;
-          // 逐项落盘：拿一项存一项，中途断开也不丢已产出素材
-          if (rec.outDir && r.url) {
+          // 逐项落盘：拿一项存一项，中途断开也不丢已产出素材。
+          // P0-3：判据放宽到 urls —— 由 saveSceneToDisk 全量落盘（上游单请求固定 4 张）。
+          if (rec.outDir && (r.url || (r.urls && r.urls.length))) {
             try {
               await saveSceneToDisk(r, rec.outDir, rec.stripWm);
             } catch (e: any) {

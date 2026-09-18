@@ -66,6 +66,15 @@ export function getModel(model: string, regionInfo: RegionInfo): ModelResult {
   }
   const defaultModel = regionInfo.isInternational ? DEFAULT_MODEL_US : DEFAULT_MODEL;
 
+  // P1-2（2026-09-18 新增分支，纯追加，不改动下方既有逻辑）：
+  // 显式定义「**未传** model」的行为 → 落到**区域默认**。
+  // 旧实现对未传（空串/undefined）会一路走到下面的 "国际版不支持模型" 抛错，
+  // 这正是 P1-1（去 Agent 层硬编码默认模型）的前置依赖。
+  if (!model) {
+    logger.info(`未指定模型，使用区域默认模型 "${defaultModel}"`);
+    return { model: modelMap[defaultModel], userModel: defaultModel };
+  }
+
   if (regionInfo.isInternational && !modelMap[model]) {
     // 如果传入的是国内站默认模型，回退到国际站默认模型
     if (model === DEFAULT_MODEL) {
@@ -432,7 +441,8 @@ async function generateImagesInternal(
       if (multiImageCountState !== "absent") reasons.push(`含数量写法（${multiImageCountState}）`);
       const hint =
         `本次请求未显式声明生成模式（mode），但提示词含组图特征：${reasons.join("；")}。`
-        + `为让产出张数可预期，本次已按【单图】执行（默认 ${getImageCountPerRequest()} 张）。`
+        + `本次已按【单图】执行：该模式可关闭组图分支，但上游自由模式的固有产出仍为 4 张`
+        + `（2026-09-18 实测：jimeng-4.0 / jimeng-5.0 / nanobanana 一致），本次已全部返回。`
         + `若确实需要一次生成多张内容关联图，请在请求体中显式传 mode:"group"（上限 ${MAX_GROUP_IMAGE_COUNT} 张）；`
         + `若需要跨场景堆量（最多 ${MAX_AGENT_IMAGE_COUNT} 张），请改用 POST /v1/agent/tasks。`;
       if (meta) meta.hint = hint;
@@ -515,6 +525,11 @@ async function generateImagesInternal(
     maxPollCount: 900,
     pollInterval: 10000, // 10秒轮询间隔
     // 张数开关：默认 1，设 JIMENG_BENEFIT_COUNT=4 切回 4 张候选（上限 40）。
+    // ⚠️ 2026-09-18 实测更正：该开关**不控制上游实际产出张数**——住宅出口实测
+    // （CN/1k）三模型在 mode:"single" 下均固定返 4 张。expectedItemCount 因此
+    // 保持为"期望值"而非"实际值"：轮询以 item_list 非空为准，不会被它卡住。
+    // ⚠️ 2026-09-18 二次更正（同上条，勿删前一条留痕）：上方注释中"默认 1（张）"
+    // 仅指本函数返回值，**不等于实际产出**；实际产出恒为 4 张且已全部返回给调用方。
     // 必须与 buildCoreParam 的 benefitCount 同源——两处都调用 getImageCountPerRequest()，
     // 原本两处各读一遍 env 的写法已收敛，杜绝「生成 N 张却等 M 张」的轮询挂起。
     expectedItemCount: getImageCountPerRequest(),
@@ -719,7 +734,10 @@ async function generateJimeng4xMultiImages(
       + "也支持「张数:4」「数量：4」「四张」「４张」等写法。"
       + `本次提示词${hitKeywords.length ? `命中了组图关键词（${hitKeywords.join(" / ")}）` : "使用了组图模型 jimeng-4.x"}，`
       + `但未包含可识别的数量说明，已停止生成以避免非预期计费（合法范围 1-${MAX_GROUP_IMAGE_COUNT} 张）。`
-      + "若只想生成 1 张，请改用 jimeng-5.0 等单图模型、去掉提示词中的组图关键词，"
+      + "若只想生成 1 张：请去掉提示词中的组图关键词（走单图路径）——"
+      + "但请注意，**上游自由模式单请求固有产出 4 张**（2026-09-18 住宅出口实测："
+      + "jimeng-4.0 / jimeng-5.0 / nanobanana 三模型一致，mode:\"single\" 亦无法减少），"
+      + "因此改用非 4.x 模型**不会**变少，且单价更高（5.0 / nanobanana = 3 分/张，jimeng-4.0 = 1 分/张）；"
       + "或在请求里显式传 mode:\"single\"（强制单图）/ mode:\"group\"（强制组图）。"
     );
   }

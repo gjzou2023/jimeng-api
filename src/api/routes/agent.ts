@@ -19,7 +19,9 @@
  *   consistency    : boolean 是否开启一致性（默认 true；仅图片有效）
  *   ref_strength   : number  img2img 参考强度 0.1-1（默认 0.65）
  *   max_items      : number  主动收紧总量上限（不得超过硬上限 40 图 / 8 视频）
- *   out_dir        : string  服务器保存目录（留空则不落盘，只返回 url）
+ *   out_dir        : string  服务器保存目录（留空则不落盘，只返回 url）；
+ *                             落盘为**全量**——上游单请求固定产出 4 张，全部保存（P0-3/P0-4）；
+ *                             张数上限由环境变量 `JIMENG_AGENT_KEEP` 控制（默认 0 = 全存）
  *   strip_watermark : boolean 是否对落盘图片跑去水印（默认跟随 JIMENG_STRIP_WM）
  *
  * 总量硬上限（官方口径：即梦 Agent 模式一次 40 张图 / 8 个视频）：
@@ -90,7 +92,9 @@ export default {
       if (outDir) {
         fs.mkdirSync(outDir, { recursive: true });
         for (const sc of result.scenes) {
-          if (!sc.url) continue;
+          // P0-4：判据放宽到 urls —— 全量落盘由 saveSceneToDisk 内部完成，
+          // 与异步任务层（tasks.ts）共用同一实现，避免两处漂移。
+          if (!sc.url && !(sc.urls && sc.urls.length)) continue;
           try {
             await saveSceneToDisk(sc, outDir, stripWm);
           } catch (e: any) {

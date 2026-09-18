@@ -7,7 +7,13 @@
 # 说明：
 #   - 本 compose 使用本地 Dockerfile 构建（含我们的源码改动），
 #     而非 ghcr.io/iptag/jimeng-api 官方镜像（官方镜像不含三个方向增强）。
-#   - JIMENG_BENEFIT_COUNT=1 ：每请求只生成 1 张（批量场景所需，避免 4 倍计费）。
+#   - JIMENG_BENEFIT_COUNT=1 ：⚠️ **不控制实际产出张数**（2026-09-18 住宅出口实测更正）。
+#     该变量只写入埋点区 metrics_extra.benefitCount，控制面 core_param 内**没有**张数字段；
+#     上游自由模式单图路径**固定产出 4 张**（CN 区 jimeng-4.0 / jimeng-5.0 / nanobanana 三模型一致，
+#     显式 mode:"single" 亦无法减少）。故原注释「每请求只生成 1 张…避免 4 倍计费」**已证伪**
+#     （保留原文留痕，勿据此估算成本）。真正决定成本的是模型单价：
+#     jimeng-4.0 = 1 分/张；jimeng-5.0 / nanobanana = 3 分/张。
+#     4 张产出已由编排层**全量收下**（不再静默丢弃），如需限制落盘张数请用 keep 参数。
 #   - JIMENG_STRIP_WM=auto ：落盘图片自动检测水印并去除（CDN 图通常无水印，检测到才处理）。
 #   - ./scripts/skills 挂载为只读，便于不重建镜像即可增删模板。
 #   - ./output 挂载，保存批量生成的图片。

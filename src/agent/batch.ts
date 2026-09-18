@@ -25,6 +25,17 @@
  * 而本文件只取 `urls[0]` —— 多出的图**已生成、已计费、URL 被静默丢弃**。
  * 现在强制传 `mode: "single"` + `quotaMode: "agent"` 双重收口：
  * 前者禁止组图分支，后者声明本路径豁免「同提示词产出配额」（编排有自己的总量上限）。
+ *
+ * ⚠️ 2026-09-18 修复（P0，G-2 契约层）：上述修复**只关掉了组图分支**——
+ * Step 0 实测（住宅出口 / CN 区 / 1k）证明：`mode:"single"` 生效后（响应回显
+ * `mode=single`），上游在**单图路径同样返 4 张**，`jimeng-4.0`/`jimeng-5.0`/`nanobanana`
+ * 三模型一致；即"上游自由模式单请求产 4 张"是**固有行为**，无参数可减
+ * （控制面 `core_param` 里没有任何张数字段，`benefitCount` 只写进埋点区）。
+ * 因此修法从"减少产出"改为"不再丢弃"：
+ *   - `AgentSceneResult` 新增 `urls?: string[]`（契约层，P0-2），`url` 保留为首图；
+ *   - 单图分支与一致性 img2img 分支均**收集全部** URL（P0-1），不再 `url = urls[0]`；
+ *   - 落盘层按 `urls` 全量落盘并加 `keep` 上限开关（P0-3/P0-4）。
+ * 代价说明：`max_items` 语义仍是"场景数"，单场景产出可能为 4 倍（磁盘与下载量）。
  */
 
 import _ from "lodash";
@@ -61,8 +72,20 @@ export interface AgentSceneResult {
   index: number;
   title: string;
   kind: AgentKind;
+  /** 本场景**首图** URL（向后兼容保留；恒等于 urls[0]） */
   url?: string;
-  file?: string; // 路由侧保存的本地文件路径（可选）
+  /**
+   * 本场景**全部**产出 URL（2026-09-18 新增，P0-2）。
+   *
+   * 为什么必须有它：上游自由模式对**单次请求**固定产出 4 张（Step 0 实测：CN 区
+   * `jimeng-4.0` / `jimeng-5.0` / `nanobanana` 三模型一致，且 `mode:"single"` 无法改变
+   * ——`mode` 只能关掉组图分支，改不了上游固有产出）。而旧契约 `url: string`
+   * **从类型上就只能装 1 张** → 另外 3 张**已生成、已计费**却被静默丢弃。
+   */
+  urls?: string[];
+  file?: string; // 路由侧保存的本地文件路径（可选；对应首图）
+  /** 全部落盘路径（与 urls 一一对应） */
+  files?: string[];
   error?: string;
 }
 
@@ -221,22 +244,27 @@ export async function generateAgentBatch(
   );
 
   const worker = async (sc: (typeof scenes)[number], i: number): Promise<void> => {
-    const model = sc.params.model || globalModel || "jimeng-5.0";
+    // P1-1 / G-13：不再硬编码 jimeng-5.0（去掉该字符串字面量默认值）。硬编码的代价不只是"国际版不支持它、
+    // 开箱必败"，更是**成本 3 倍**——Step 0 实测同提示词同分辨率（CN/1k）：
+    // jimeng-4.0 = 1 分/张，jimeng-5.0 与 nanobanana = 3 分/张。
+    // 传空串交由 images.ts 的 resolveModel 按**区域默认**决定（DEFAULT_MODEL / DEFAULT_MODEL_US）。
+    const model = sc.params.model || globalModel || "";
     const ratio = sc.params.ratio || globalRatio;
     const resolution = sc.params.resolution || globalResolution;
     const token = pickToken();
     const label = `场景${sc.index}「${sc.title}」`;
 
     try {
-      let url: string | undefined;
+      let urls: string[] = [];
 
       if (kind === "video") {
         const duration = sc.params.duration || globalDuration;
-        url = await withRetry(label, () =>
+        const videoUrl = await withRetry(label, () =>
           generateVideo(model, sc.prompt, { ratio, resolution, duration } as any, token)
         );
+        urls = videoUrl ? [videoUrl] : [];
       } else if (consistency && i > 0 && firstImageUrl) {
-        const urls = await withRetry(label, () =>
+        urls = (await withRetry(label, () =>
           generateImageComposition(
             model,
             sc.prompt,
@@ -244,25 +272,26 @@ export async function generateAgentBatch(
             { ratio, resolution, sampleStrength: refStrength },
             token
           )
-        );
-        url = urls[0];
+        )) || [];
       } else {
         // ★ 强制单图 + 声明豁免配额：见文件头「2026-09-17 修复（P0）」
-        const urls = await withRetry(label, () =>
+        urls = (await withRetry(label, () =>
           generateImages(
             model,
             sc.prompt,
             { ratio, resolution, mode: "single", quotaMode: "agent" } as any,
             token
           )
-        );
-        url = urls[0];
+        )) || [];
       }
 
+      const url = urls.filter((u) => !!u)[0];
       if (!url) throw new Error("未返回 URL");
       if (kind === "image" && i === 0) firstImageUrl = url;
-      results[i] = { index: sc.index, title: sc.title, kind, url };
-      logger.info(`[agent] ${label} 生成成功`);
+      // P0-1：收下**全部**产出。上游单请求固定 4 张且**已计费**，丢弃即净损失。
+      const allUrls = urls.filter((u) => !!u);
+      results[i] = { index: sc.index, title: sc.title, kind, url, urls: allUrls };
+      logger.info(`[agent] ${label} 生成成功（产出 ${allUrls.length} 张，全部保留）`);
     } catch (e: any) {
       const msg = `${label}失败: ${e?.message || e}`;
       logger.error(msg);

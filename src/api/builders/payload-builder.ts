@@ -141,6 +141,10 @@ export const MAX_AGENT_VIDEO_COUNT = 8;
  * - `"single"` = **强制单图**：忽略提示词里的组图关键词与数量写法，张数由 `benefitCount` 决定
  *   （默认 1、上限 `MAX_SINGLE_IMAGE_COUNT`）。**Agent 编排层必须传这个值**，
  *   否则场景提示词一旦含「连续/绘本/故事」就可能被组图分支吞掉（详见 AGENT_FEATURES.md）。
+ *   ⚠️ 2026-09-18 实测更正（上文"张数由 benefitCount 决定"**已证伪**，原文留痕）：
+ *   本值的真实、且唯一有效的作用是**禁止组图分支**（这一点未变，编排层仍必须传）；
+ *   它**改不了上游固有产出**——自由模式单图路径固定返 4 张（三模型一致）；
+ *   `benefitCount` 亦**不决定张数**（只写埋点区，见下方 `getImageCountPerRequest()`）。
  * - `"group"`  = **强制组图**：走 `ImageMultiGenerate`，必须在提示词里显式写明张数（1–15）。
  * - `"auto"`   = 兼容模式（**默认**）：**不再按关键词自动切组图**。
  *   即使提示词命中「连续/绘本/故事」或出现数量写法，也**按单图执行**，
@@ -166,7 +170,13 @@ export function normalizeImageMode(raw: unknown): ImageMode {
  * 单图路径「每请求生成张数」的唯一读取点。
  *
  * - 默认 1 张（按排查报告"修正与补充"要求：每次只生成 1 张，省约 3/4 计费）
+ *   ⚠️ 2026-09-18 实测更正：**该目标无法通过现有参数达成**。住宅出口实测（CN / 1k /
+ *   同一提示词形态）：jimeng-4.0、jimeng-5.0、nanobanana 三模型在 mode:"single" 下
+ *   **均固定返回 4 张**。本函数返回值只写进埋点区 metrics_extra.sceneOptions[0].benefitCount，
+ *   而控制面 core_param 中**没有任何张数字段**——故"省约 3/4 计费"表述已作废（保留原文留痕）。
  * - 设 JIMENG_BENEFIT_COUNT=4 可切回上游行为（生成 4 张候选、4 选 1 挑选）
+ *   ⚠️ 2026-09-18 实测更正：设 `1` 或 `4` **产出都是 4 张**——该变量不改变实际产出；
+ *   本行仅描述"取值语义与钳制上限"，勿据此推断"设 1 就是 1 张"。
  * - 未设置 / 非数字 / 小于 1 → 回退 1；超过 MAX_SINGLE_IMAGE_COUNT → 按上限截断
  *
  * ⚠️ 本函数是「单图路径张数」的唯一来源：buildCoreParam 的 benefitCount 与
@@ -181,7 +191,9 @@ export function getImageCountPerRequest(): number {
 
 /**
  * benefitCount 规则
- * - 生图模式：取 getImageCountPerRequest()（默认 1 张）
+ * - 生图模式：取 getImageCountPerRequest()（默认返回 1）
+ *   ⚠️ 2026-09-18 实测：该返回值只写**埋点区**，**不影响上游实际产出张数**——
+ *   单图路径恒返 4 张（详见 `getImageCountPerRequest()` 注释与 AGENT_FEATURES.md §3.1）。
  * - 多图模式：不加（张数由提示词决定，见 images.ts 的 parseMultiImageCount）
  */
 export function getBenefitCount(
