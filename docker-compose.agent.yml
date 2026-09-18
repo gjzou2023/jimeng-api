@@ -1,0 +1,57 @@
+# jimeng-api 全功能构建（含三个方向增强 + 去水印）
+# 直接基于本仓库 Dockerfile 构建，自包含、可独立部署。
+#
+# 用法：
+#   docker compose -f docker-compose.agent.yml up -d --build
+#
+# 说明：
+#   - 本 compose 使用本地 Dockerfile 构建（含我们的源码改动），
+#     而非 ghcr.io/iptag/jimeng-api 官方镜像（官方镜像不含三个方向增强）。
+#   - JIMENG_BENEFIT_COUNT=1 ：**调用方未传 n 时**的兜底张数。
+#     ⚠️ 2026-09-18 更正（推翻本处旧注释）：本变量**现在真的生效**。
+#     旧注释称「不控制实际产出张数、上游固定产出 4 张」——该结论已证伪：真因是报文里
+#     **缺** `abilities.gen_option.gen_count`（我们从未发送），上游遂取模型兜底
+#     `default_generate_count = 4`（4.x/5.x 图片模型）。补齐该字段后 n 即生效。
+#     优先级：请求参数 `n`（1~8）＞ 本变量 ＞ 默认 1。
+#     单价参考（CN/1k 实测）：jimeng-4.0 = 1 分/张；jimeng-5.0(lite) / nanobanana = 3 分/张。
+#     成本 = 张数 × 单价 —— 想省钱先调张数（n），再考虑换模型（换模型只影响画质与单价）。
+#   - JIMENG_STRIP_WM=auto ：落盘图片自动检测水印并去除（CDN 图通常无水印，检测到才处理）。
+#   - ./scripts/skills 挂载为只读，便于不重建镜像即可增删模板。
+#   - ./output 挂载，保存批量生成的图片。
+#     ⚠️ N-11（2026-09-18）：宿主 output/ 的属主**必须**是容器内服务用户 uid=1001，
+#     否则落盘会**静默失败**（EACCES，接口却仍返回 url）。deploy.sh 已自动校正属主；
+#     接口也会在任何生成动作之前做可写性预检（N-9），不可写则 0 积分直接报错。
+
+services:
+  jimeng-api-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: 1.6.3-agent
+    image: jimeng-api-agent:latest
+    container_name: jimeng-api-agent
+    restart: unless-stopped
+    ports:
+      - "5100:5100"
+    environment:
+      - SERVER_PORT=5100
+      - JIMENG_BENEFIT_COUNT=1
+      - JIMENG_AGENT_OUT_DIR=/app/output
+      - JIMENG_STRIP_WM=auto
+      - JIMENG_PYTHON=python3
+      - JIMENG_WM_SCRIPT=/app/scripts/watermark_cli.py
+    volumes:
+      - ./scripts/skills:/app/scripts/skills:ro
+      - ./output:/app/output
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5100/ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
